@@ -41,7 +41,7 @@ type EthAPIBackend struct {
 
 // ChainConfig returns the active chain configuration.
 func (b *EthAPIBackend) ChainConfig() *params.ChainConfig {
-	return b.svc.store.GetRules().EvmChainConfig()
+	return b.svc.store.GetEvmChainConfig()
 }
 
 func (b *EthAPIBackend) CurrentBlock() *evmcore.EvmBlock {
@@ -93,7 +93,7 @@ func (b *EthAPIBackend) BlockByNumber(ctx context.Context, number rpc.BlockNumbe
 	if number == rpc.PendingBlockNumber {
 		number = rpc.LatestBlockNumber
 	}
-	// Otherwise resolve and return the block
+	// Otherwise, resolve and return the block
 	var blk *evmcore.EvmBlock
 	if number == rpc.LatestBlockNumber {
 		blk = b.state.CurrentBlock()
