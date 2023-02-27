@@ -21,13 +21,13 @@ import (
 	"math"
 	"math/big"
 
+	substate "github.com/Fantom-foundation/Substate"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/substate"
 
 	"github.com/Fantom-foundation/go-opera/utils/signers/gsignercache"
 	"github.com/Fantom-foundation/go-opera/utils/signers/internaltx"
@@ -52,9 +52,10 @@ func NewStateProcessor(config *params.ChainConfig, bc DummyChain) *StateProcesso
 
 // global variable tracking number of transactions in a block
 var (
-	txCounter int
+	txCounter      int
 	oldBlockNumber uint64 = math.MaxUint64
 )
+
 // Process processes the state changes according to the Ethereum rules by running
 // the transaction messages using the statedb and applying any rewards to both
 // the processor (coinbase) and any included uncles.

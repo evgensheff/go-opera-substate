@@ -3,6 +3,7 @@ package launcher
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,8 +14,15 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"context"
 
+	substate "github.com/Fantom-foundation/Substate"
+	"github.com/Fantom-foundation/go-opera/evmcore"
+	"github.com/Fantom-foundation/go-opera/gossip"
+	"github.com/Fantom-foundation/go-opera/gossip/emitter"
+	"github.com/Fantom-foundation/go-opera/integration"
+	"github.com/Fantom-foundation/go-opera/inter"
+	"github.com/Fantom-foundation/go-opera/opera/genesisstore"
+	"github.com/Fantom-foundation/go-opera/utils/ioread"
 	"github.com/Fantom-foundation/lachesis-base/hash"
 	"github.com/Fantom-foundation/lachesis-base/inter/idx"
 	"github.com/ethereum/go-ethereum/cmd/utils"
@@ -22,18 +30,8 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/ethereum/go-ethereum/substate"
 	"github.com/status-im/keycard-go/hexutils"
 	"gopkg.in/urfave/cli.v1"
-
-	"github.com/Fantom-foundation/go-opera/gossip"
-	"github.com/Fantom-foundation/go-opera/gossip/emitter"
-	"github.com/Fantom-foundation/go-opera/integration"
-	"github.com/Fantom-foundation/go-opera/inter"
-	"github.com/Fantom-foundation/go-opera/opera/genesisstore"
-	"github.com/Fantom-foundation/go-opera/utils/ioread"
-	"github.com/Fantom-foundation/go-opera/evmcore"
-
 )
 
 func importEvm(ctx *cli.Context) error {
@@ -85,7 +83,7 @@ func importEvmFile(fn string, gdb *gossip.Store) error {
 func importEvents(ctx *cli.Context) error {
 
 	if ctx.Bool(RecordingFlag.Name) {
-	        // OpenSubstateDB
+		// OpenSubstateDB
 		substate.RecordReplay = true
 		substate.SetSubstateDirectory(ctx.String(SubstateDirFlag.Name))
 		substate.OpenSubstateDB()
@@ -105,7 +103,7 @@ func importEvents(ctx *cli.Context) error {
 		go vm.MicroProfilingCollector(ctx, ch, stats)
 		defer func() {
 			(cancel)() // stop data collector
-			<-ch  	   // wait for data collector to finish
+			<-ch       // wait for data collector to finish
 			// TODO: get chainID from cli
 			version := fmt.Sprintf("git-date:%v, git-commit:%v, chaind-id:%v", gitDate, gitCommit, 250)
 			stats.Dump(version)
