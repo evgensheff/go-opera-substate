@@ -2,7 +2,6 @@ package evmstore
 
 import (
 	"errors"
-	"sync"
 
 	"github.com/Fantom-foundation/lachesis-base/hash"
 	"github.com/Fantom-foundation/lachesis-base/inter/idx"
@@ -20,7 +19,6 @@ import (
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 
-	"github.com/Fantom-foundation/go-opera/inter"
 	"github.com/Fantom-foundation/go-opera/inter/iblockproc"
 	"github.com/Fantom-foundation/go-opera/logger"
 	"github.com/Fantom-foundation/go-opera/topicsdb"
@@ -34,10 +32,8 @@ const nominalSize uint = 1
 type Store struct {
 	cfg StoreConfig
 
-	mainDB kvdb.Store
-	table  struct {
-		Evm  kvdb.Store `table:"M"`
-		Logs kvdb.Store `table:"L"`
+	table struct {
+		Evm kvdb.Store `table:"M"`
 		// API-only tables
 		Receipts    kvdb.Store `table:"r"`
 		TxPositions kvdb.Store `table:"x"`
@@ -46,17 +42,13 @@ type Store struct {
 
 	EvmDb    ethdb.Database
 	EvmState state.Database
-	EvmLogs  *topicsdb.Index
+	EvmLogs  topicsdb.Index
 	Snaps    *snapshot.Tree
 
 	cache struct {
 		TxPositions *wlru.Cache `cache:"-"` // store by pointer
 		Receipts    *wlru.Cache `cache:"-"` // store by value
 		EvmBlocks   *wlru.Cache `cache:"-"` // store by pointer
-	}
-
-	mutex struct {
-		Inc sync.Mutex
 	}
 
 	rlp rlpstore.Helper
@@ -67,41 +59,71 @@ type Store struct {
 }
 
 const (
-	TriesInMemory = 32
+	TriesInMemory = 16
 )
 
 // NewStore creates store over key-value db.
-func NewStore(mainDB kvdb.Store, cfg StoreConfig) *Store {
+func NewStore(dbs kvdb.DBProducer, cfg StoreConfig) *Store {
 	s := &Store{
 		cfg:      cfg,
-		mainDB:   mainDB,
 		Instance: logger.New("evm-store"),
 		rlp:      rlpstore.Helper{logger.New("rlp")},
 		triegc:   prque.New(nil),
 	}
 
-	table.MigrateTables(&s.table, s.mainDB)
+	err := table.OpenTables(&s.table, dbs, "evm")
+	if err != nil {
+		s.Log.Crit("Failed to open tables", "err", err)
+	}
 
-	s.EvmDb = rawdb.NewDatabase(
-		kvdb2ethdb.Wrap(
-			nokeyiserr.Wrap(
-				s.table.Evm)))
-	s.EvmState = state.NewDatabaseWithConfig(s.EvmDb, &trie.Config{
-		Cache:     cfg.Cache.EvmDatabase / opt.MiB,
-		Journal:   cfg.Cache.TrieCleanJournal,
-		Preimages: cfg.EnablePreimageRecording,
-	})
-	s.EvmLogs = topicsdb.New(s.table.Logs)
-
+	s.initEVMDB()
+	s.EvmLogs = topicsdb.NewWithThreadPool(dbs)
 	s.initCache()
 
 	return s
+}
+
+// Close closes underlying database.
+func (s *Store) Close() {
+	setnil := func() interface{} {
+		return nil
+	}
+
+	_ = table.CloseTables(&s.table)
+	table.MigrateTables(&s.table, nil)
+	table.MigrateCaches(&s.cache, setnil)
+	s.EvmLogs.Close()
 }
 
 func (s *Store) initCache() {
 	s.cache.Receipts = s.makeCache(s.cfg.Cache.ReceiptsSize, s.cfg.Cache.ReceiptsBlocks)
 	s.cache.TxPositions = s.makeCache(nominalSize*uint(s.cfg.Cache.TxPositions), s.cfg.Cache.TxPositions)
 	s.cache.EvmBlocks = s.makeCache(s.cfg.Cache.EvmBlocksSize, s.cfg.Cache.EvmBlocksNum)
+}
+
+func (s *Store) initEVMDB() {
+	s.EvmDb = rawdb.NewDatabase(
+		kvdb2ethdb.Wrap(
+			nokeyiserr.Wrap(
+				s.table.Evm)))
+	s.EvmState = state.NewDatabaseWithConfig(s.EvmDb, &trie.Config{
+		Cache:     s.cfg.Cache.EvmDatabase / opt.MiB,
+		Journal:   s.cfg.Cache.TrieCleanJournal,
+		Preimages: s.cfg.EnablePreimageRecording,
+		GreedyGC:  s.cfg.Cache.GreedyGC,
+	})
+}
+
+func (s *Store) ResetWithEVMDB(evmStore kvdb.Store) *Store {
+	cp := *s
+	cp.table.Evm = evmStore
+	cp.initEVMDB()
+	cp.Snaps = nil
+	return &cp
+}
+
+func (s *Store) EVMDB() kvdb.Store {
+	return s.table.Evm
 }
 
 func (s *Store) GenerateEvmSnapshot(root common.Hash, rebuild, async bool) (err error) {
@@ -126,6 +148,33 @@ func (s *Store) RebuildEvmSnapshot(root common.Hash) {
 	s.Snaps.Rebuild(root)
 }
 
+// CleanCommit clean old state trie and commit changes.
+func (s *Store) CleanCommit(block iblockproc.BlockState) error {
+	// Don't need to reference the current state root
+	// due to it already be referenced on `Commit()` function
+	triedb := s.EvmState.TrieDB()
+	stateRoot := common.Hash(block.FinalizedStateRoot)
+	if current := uint64(block.LastBlock.Idx); current > TriesInMemory {
+		// Find the next state trie we need to commit
+		chosen := current - TriesInMemory
+		// Garbage collect all below the chosen block
+		for !s.triegc.Empty() {
+			root, number := s.triegc.Pop()
+			if uint64(-number) > chosen {
+				s.triegc.Push(root, number)
+				break
+			}
+			triedb.Dereference(root.(common.Hash))
+		}
+	}
+	// commit the state trie after clean up
+	err := triedb.Commit(stateRoot, false, nil)
+	if err != nil {
+		s.Log.Error("Failed to flush trie DB into main DB", "err", err)
+	}
+	return err
+}
+
 func (s *Store) PauseEvmSnapshot() {
 	s.Snaps.Disable()
 }
@@ -135,9 +184,9 @@ func (s *Store) IsEvmSnapshotPaused() bool {
 }
 
 // Commit changes.
-func (s *Store) Commit(block iblockproc.BlockState, flush bool) error {
+func (s *Store) Commit(block idx.Block, root hash.Hash, flush bool) error {
 	triedb := s.EvmState.TrieDB()
-	stateRoot := common.Hash(block.FinalizedStateRoot)
+	stateRoot := common.Hash(root)
 	// If we're applying genesis or running an archive node, always flush
 	if flush || s.cfg.Cache.TrieDirtyDisabled {
 		err := triedb.Commit(stateRoot, false, nil)
@@ -148,21 +197,16 @@ func (s *Store) Commit(block iblockproc.BlockState, flush bool) error {
 	} else {
 		// Full but not archive node, do proper garbage collection
 		triedb.Reference(stateRoot, common.Hash{}) // metadata reference to keep trie alive
-		s.triegc.Push(stateRoot, -int64(block.LastBlock.Idx))
+		s.triegc.Push(stateRoot, -int64(block))
 
-		if current := uint64(block.LastBlock.Idx); current > TriesInMemory {
+		if current := uint64(block); current > TriesInMemory {
 			// If we exceeded our memory allowance, flush matured singleton nodes to disk
-			var (
-				nodes, imgs = triedb.Size()
-				limit       = common.StorageSize(s.cfg.Cache.TrieDirtyLimit)
-			)
-			if nodes > limit || imgs > 4*1024*1024 {
-				triedb.Cap(limit - ethdb.IdealBatchSize)
-			}
+			s.Cap()
+
 			// Find the next state trie we need to commit
 			chosen := current - TriesInMemory
 
-			// Garbage collect anything below our required write retention
+			// Garbage collect all below the chosen block
 			for !s.triegc.Empty() {
 				root, number := s.triegc.Pop()
 				if uint64(-number) > chosen {
@@ -176,7 +220,7 @@ func (s *Store) Commit(block iblockproc.BlockState, flush bool) error {
 	}
 }
 
-func (s *Store) Flush(block iblockproc.BlockState, getBlock func(n idx.Block) *inter.Block) {
+func (s *Store) Flush(block iblockproc.BlockState) {
 	// Ensure that the entirety of the state snapshot is journalled to disk.
 	var snapBase common.Hash
 	if s.Snaps != nil {
@@ -186,23 +230,13 @@ func (s *Store) Flush(block iblockproc.BlockState, getBlock func(n idx.Block) *i
 		}
 	}
 	// Ensure the state of a recent block is also stored to disk before exiting.
-	// We're writing three different states to catch different restart scenarios:
-	//  - HEAD:     So we don't need to reprocess any blocks in the general case
-	//  - HEAD-1:   So we don't do large reorgs if our HEAD becomes an uncle
-	//  - HEAD-31:  So we have a hard limit on the number of blocks reexecuted
 	if !s.cfg.Cache.TrieDirtyDisabled {
 		triedb := s.EvmState.TrieDB()
 
-		for _, offset := range []uint64{0, 1, TriesInMemory - 1} {
-			if number := uint64(block.LastBlock.Idx); number > offset {
-				recent := getBlock(idx.Block(number - offset))
-				if recent == nil || recent.Root == hash.Zero {
-					break
-				}
-				s.Log.Info("Writing cached state to disk", "block", number-offset, "root", recent.Root)
-				if err := triedb.Commit(common.Hash(recent.Root), true, nil); err != nil {
-					s.Log.Error("Failed to commit recent state trie", "err", err)
-				}
+		if number := uint64(block.LastBlock.Idx); number > 0 {
+			s.Log.Info("Writing cached state to disk", "block", number, "root", block.FinalizedStateRoot)
+			if err := triedb.Commit(common.Hash(block.FinalizedStateRoot), true, nil); err != nil {
+				s.Log.Error("Failed to commit recent state trie", "err", err)
 			}
 		}
 		if snapBase != (common.Hash{}) {
@@ -210,12 +244,6 @@ func (s *Store) Flush(block iblockproc.BlockState, getBlock func(n idx.Block) *i
 			if err := triedb.Commit(snapBase, true, nil); err != nil {
 				s.Log.Error("Failed to commit recent state trie", "err", err)
 			}
-		}
-		for !s.triegc.Empty() {
-			triedb.Dereference(s.triegc.PopItem().(common.Hash))
-		}
-		if size, _ := triedb.Size(); size != 0 {
-			s.Log.Error("Dangling trie nodes after full cleanup")
 		}
 	}
 	// Ensure all live cached entries be saved into disk, so that we can skip
@@ -226,12 +254,16 @@ func (s *Store) Flush(block iblockproc.BlockState, getBlock func(n idx.Block) *i
 	}
 }
 
-func (s *Store) Cap(max, min int) {
-	maxSize := common.StorageSize(max)
-	minSize := common.StorageSize(min)
-	size, preimagesSize := s.EvmState.TrieDB().Size()
-	if size >= maxSize || preimagesSize >= maxSize {
-		_ = s.EvmState.TrieDB().Cap(minSize)
+// Cap flush matured singleton nodes to disk
+func (s *Store) Cap() {
+	triedb := s.EvmState.TrieDB()
+	var (
+		nodes, imgs = triedb.Size()
+		limit       = common.StorageSize(s.cfg.Cache.TrieDirtyLimit)
+	)
+	// If we exceeded our memory allowance, flush matured singleton nodes to disk
+	if nodes > limit+ethdb.IdealBatchSize || imgs > 4*1024*1024 {
+		triedb.Cap(limit)
 	}
 }
 

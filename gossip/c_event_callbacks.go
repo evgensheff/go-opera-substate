@@ -120,6 +120,7 @@ func processLastEvent(lasts *concurrent.ValidatorEventsSet, e *inter.EventPayloa
 }
 
 func (s *Service) switchEpochTo(newEpoch idx.Epoch) {
+	s.store.cache.EventIDs.Reset(newEpoch)
 	s.store.SetHighestLamport(0)
 	// reset dag indexer
 	s.store.resetEpochStore(newEpoch)
@@ -278,9 +279,10 @@ func (s *Service) mayCommit(epochSealing bool) {
 func (s *Service) commit(epochSealing bool) {
 	// s.engineMu is locked here
 	s.blockProcWg.Wait()
-	// TODO: prune old MPTs in beginnings of committed sections
-	if !s.store.cfg.EVM.Cache.TrieDirtyDisabled {
-		s.store.commitEVM(true)
+	// if gcmode is full and snapsync is finalized, clean all the old state trie
+	// and commit the state trie at the current block
+	if !s.store.cfg.EVM.Cache.TrieDirtyDisabled && s.handler.syncStatus.AcceptEvents() {
+		s.store.cleanCommitEVM()
 	}
 	_ = s.store.Commit()
 	if epochSealing {

@@ -2,26 +2,25 @@ package launcher
 
 import (
 	"compress/gzip"
-	"errors"
 	"io"
 	"os"
-	"path"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Fantom-foundation/lachesis-base/hash"
 	"github.com/Fantom-foundation/lachesis-base/inter/idx"
-	"github.com/Fantom-foundation/lachesis-base/kvdb"
+	"github.com/Fantom-foundation/lachesis-base/kvdb/batched"
+	"github.com/Fantom-foundation/lachesis-base/kvdb/pebble"
 	"github.com/ethereum/go-ethereum/cmd/utils"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/status-im/keycard-go/hexutils"
+	"github.com/syndtr/goleveldb/leveldb/opt"
 	"gopkg.in/urfave/cli.v1"
 
 	"github.com/Fantom-foundation/go-opera/gossip"
-	"github.com/Fantom-foundation/go-opera/integration"
 )
 
 var (
@@ -40,11 +39,8 @@ func exportEvents(ctx *cli.Context) error {
 
 	cfg := makeAllConfigs(ctx)
 
-	rawProducer := integration.DBProducer(path.Join(cfg.Node.DataDir, "chaindata"), cfg.cachescale)
-	gdb, err := makeRawGossipStore(rawProducer, cfg)
-	if err != nil {
-		log.Crit("DB opening error", "datadir", cfg.Node.DataDir, "err", err)
-	}
+	rawDbs := makeDirectDBsProducer(cfg)
+	gdb := makeGossipStore(rawDbs, cfg)
 	defer gdb.Close()
 
 	fn := ctx.Args().First()
@@ -93,35 +89,6 @@ func exportEvents(ctx *cli.Context) error {
 	return nil
 }
 
-func checkStateInitialized(rawProducer kvdb.IterableDBProducer) error {
-	names := rawProducer.Names()
-	if len(names) == 0 {
-		return errors.New("datadir is not initialized")
-	}
-	// if flushID is not written, then previous genesis processing attempt was interrupted
-	for _, name := range names {
-		db, err := rawProducer.OpenDB(name)
-		if err != nil {
-			return err
-		}
-		flushID, _ := db.Get(integration.FlushIDKey)
-		_ = db.Close()
-		if flushID != nil {
-			return nil
-		}
-	}
-	return errors.New("datadir is not initialized")
-}
-
-func makeRawGossipStore(rawProducer kvdb.IterableDBProducer, cfg *config) (*gossip.Store, error) {
-	if err := checkStateInitialized(rawProducer); err != nil {
-		return nil, err
-	}
-	dbs := &integration.DummyFlushableProducer{rawProducer}
-	gdb := gossip.NewStore(dbs, cfg.OperaStore)
-	return gdb, nil
-}
-
 // exportTo writer the active chain.
 func exportTo(w io.Writer, gdb *gossip.Store, from, to idx.Epoch) (err error) {
 	start, reported := time.Now(), time.Time{}
@@ -149,4 +116,39 @@ func exportTo(w io.Writer, gdb *gossip.Store, from, to idx.Epoch) (err error) {
 	log.Info("Exported events", "last", last.String(), "exported", counter, "elapsed", common.PrettyDuration(time.Since(start)))
 
 	return
+}
+
+func exportEvmKeys(ctx *cli.Context) error {
+	if len(ctx.Args()) < 1 {
+		utils.Fatalf("This command requires an argument.")
+	}
+
+	cfg := makeAllConfigs(ctx)
+
+	rawDbs := makeDirectDBsProducer(cfg)
+	gdb := makeGossipStore(rawDbs, cfg)
+	defer gdb.Close()
+
+	fn := ctx.Args().First()
+
+	keysDB_, err := pebble.New(fn, 1024*opt.MiB, utils.MakeDatabaseHandles()/2, nil, nil)
+	if err != nil {
+		return err
+	}
+	keysDB := batched.Wrap(keysDB_)
+	defer keysDB.Close()
+
+	it := gdb.EvmStore().EvmDb.NewIterator(nil, nil)
+	// iterate only over MPT data
+	it = mptAndPreimageIterator{it}
+	defer it.Release()
+
+	log.Info("Exporting EVM keys", "dir", fn)
+	for it.Next() {
+		if err := keysDB.Put(it.Key(), []byte{0}); err != nil {
+			return err
+		}
+	}
+	log.Info("Exported EVM keys", "dir", fn)
+	return nil
 }

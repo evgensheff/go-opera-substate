@@ -10,7 +10,6 @@ import (
 	"math"
 	"os"
 	"os/signal"
-	"path"
 	"strings"
 	"syscall"
 	"time"
@@ -19,7 +18,6 @@ import (
 	"github.com/Fantom-foundation/go-opera/evmcore"
 	"github.com/Fantom-foundation/go-opera/gossip"
 	"github.com/Fantom-foundation/go-opera/gossip/emitter"
-	"github.com/Fantom-foundation/go-opera/integration"
 	"github.com/Fantom-foundation/go-opera/inter"
 	"github.com/Fantom-foundation/go-opera/opera/genesisstore"
 	"github.com/Fantom-foundation/go-opera/utils/ioread"
@@ -42,11 +40,8 @@ func importEvm(ctx *cli.Context) error {
 
 	cfg := makeAllConfigs(ctx)
 
-	rawProducer := integration.DBProducer(path.Join(cfg.Node.DataDir, "chaindata"), cfg.cachescale)
-	gdb, err := makeRawGossipStore(rawProducer, cfg)
-	if err != nil {
-		log.Crit("DB opening error", "datadir", cfg.Node.DataDir, "err", err)
-	}
+	rawDbs := makeDirectDBsProducer(cfg)
+	gdb := makeGossipStore(rawDbs, cfg)
 	defer gdb.Close()
 
 	for _, fn := range ctx.Args() {

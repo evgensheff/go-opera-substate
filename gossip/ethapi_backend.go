@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Fantom-foundation/lachesis-base/hash"
 	"github.com/Fantom-foundation/lachesis-base/inter/idx"
@@ -39,9 +40,14 @@ type EthAPIBackend struct {
 	allowUnprotectedTxs bool
 }
 
+// SetExtRPCEnabled updates extRPCEnabled
+func (b *EthAPIBackend) SetExtRPCEnabled(v bool) {
+	b.extRPCEnabled = v
+}
+
 // ChainConfig returns the active chain configuration.
 func (b *EthAPIBackend) ChainConfig() *params.ChainConfig {
-	return b.svc.store.GetRules().EvmChainConfig()
+	return b.svc.store.GetEvmChainConfig()
 }
 
 func (b *EthAPIBackend) CurrentBlock() *evmcore.EvmBlock {
@@ -93,7 +99,7 @@ func (b *EthAPIBackend) BlockByNumber(ctx context.Context, number rpc.BlockNumbe
 	if number == rpc.PendingBlockNumber {
 		number = rpc.LatestBlockNumber
 	}
-	// Otherwise resolve and return the block
+	// Otherwise, resolve and return the block
 	var blk *evmcore.EvmBlock
 	if number == rpc.LatestBlockNumber {
 		blk = b.state.CurrentBlock()
@@ -452,11 +458,15 @@ func (b *EthAPIBackend) RPCGasCap() uint64 {
 	return b.svc.config.RPCGasCap
 }
 
+func (b *EthAPIBackend) RPCEVMTimeout() time.Duration {
+	return b.svc.config.RPCEVMTimeout
+}
+
 func (b *EthAPIBackend) RPCTxFeeCap() float64 {
 	return b.svc.config.RPCTxFeeCap
 }
 
-func (b *EthAPIBackend) EvmLogIndex() *topicsdb.Index {
+func (b *EthAPIBackend) EvmLogIndex() topicsdb.Index {
 	return b.svc.store.evm.EvmLogs
 }
 

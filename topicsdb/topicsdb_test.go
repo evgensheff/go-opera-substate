@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
-	"sync"
 	"testing"
 
 	"github.com/Fantom-foundation/lachesis-base/hash"
@@ -16,55 +15,6 @@ import (
 
 	"github.com/Fantom-foundation/go-opera/logger"
 )
-
-// FindInBlocksAsync returns all log records of block range by pattern. 1st pattern element is an address.
-// Fetches log's body async.
-func (tt *Index) FindInBlocksAsync(ctx context.Context, from, to idx.Block, pattern [][]common.Hash) (logs []*types.Log, err error) {
-	if from > to {
-		return
-	}
-
-	pattern, err = limitPattern(pattern)
-	if err != nil {
-		return
-	}
-
-	var wg sync.WaitGroup
-	ready := make(chan *logrec)
-	defer close(ready)
-
-	go func() {
-		failed := false
-		for rec := range ready {
-			wg.Done()
-			if failed {
-				continue
-			}
-			if rec.err != nil {
-				err = rec.err
-				failed = true
-				continue
-			}
-			logs = append(logs, rec.result)
-		}
-	}()
-
-	onMatched := func(rec *logrec) (gonext bool, err error) {
-		wg.Add(1)
-		go func() {
-			rec.fetch(tt.table.Logrec)
-			ready <- rec
-		}()
-
-		gonext = true
-		return
-	}
-
-	err = tt.searchLazy(ctx, pattern, uintToBytes(uint64(from)), uint64(to), onMatched)
-	wg.Wait()
-
-	return
-}
 
 func TestIndexSearchMultyVariants(t *testing.T) {
 	logger.SetTestMode(t)
@@ -97,7 +47,7 @@ func TestIndexSearchMultyVariants(t *testing.T) {
 	},
 	}
 
-	index := New(memorydb.New())
+	index := newIndex(memorydb.NewProducer(""))
 
 	for _, l := range testdata {
 		err := index.Push(l)
@@ -119,9 +69,11 @@ func TestIndexSearchMultyVariants(t *testing.T) {
 		}
 	}
 
+	pooled := withThreadPool{index}
+
 	for dsc, method := range map[string]func(context.Context, idx.Block, idx.Block, [][]common.Hash) ([]*types.Log, error){
-		"sync":  index.FindInBlocks,
-		"async": index.FindInBlocksAsync,
+		"index":  index.FindInBlocks,
+		"pooled": pooled.FindInBlocks,
 	} {
 		t.Run(dsc, func(t *testing.T) {
 
@@ -191,21 +143,107 @@ func TestIndexSearchMultyVariants(t *testing.T) {
 	}
 }
 
+func TestIndexSearchShortCircuits(t *testing.T) {
+	logger.SetTestMode(t)
+	var (
+		hash1 = common.BytesToHash([]byte("topic1"))
+		hash2 = common.BytesToHash([]byte("topic2"))
+		hash3 = common.BytesToHash([]byte("topic3"))
+		hash4 = common.BytesToHash([]byte("topic4"))
+		addr1 = randAddress()
+		addr2 = randAddress()
+	)
+	testdata := []*types.Log{{
+		BlockNumber: 1,
+		Address:     addr1,
+		Topics:      []common.Hash{hash1, hash2},
+	}, {
+		BlockNumber: 3,
+		Address:     addr1,
+		Topics:      []common.Hash{hash1, hash2, hash3},
+	}, {
+		BlockNumber: 998,
+		Address:     addr2,
+		Topics:      []common.Hash{hash1, hash2, hash4},
+	}, {
+		BlockNumber: 999,
+		Address:     addr1,
+		Topics:      []common.Hash{hash1, hash2, hash4},
+	},
+	}
+
+	index := newIndex(memorydb.NewProducer(""))
+
+	for _, l := range testdata {
+		err := index.Push(l)
+		require.NoError(t, err)
+	}
+
+	pooled := withThreadPool{index}
+
+	for dsc, method := range map[string]func(context.Context, idx.Block, idx.Block, [][]common.Hash) ([]*types.Log, error){
+		"index":  index.FindInBlocks,
+		"pooled": pooled.FindInBlocks,
+	} {
+		t.Run(dsc, func(t *testing.T) {
+
+			t.Run("topics count 1", func(t *testing.T) {
+				require := require.New(t)
+				got, err := method(nil, 0, 1000, [][]common.Hash{
+					{addr1.Hash()},
+					{},
+					{},
+					{hash3},
+				})
+				require.NoError(err)
+				require.Equal(1, len(got))
+			})
+
+			t.Run("topics count 2", func(t *testing.T) {
+				require := require.New(t)
+				got, err := method(nil, 0, 1000, [][]common.Hash{
+					{addr1.Hash()},
+					{},
+					{},
+					{hash3, hash4},
+				})
+				require.NoError(err)
+				require.Equal(2, len(got))
+			})
+
+			t.Run("block range", func(t *testing.T) {
+				require := require.New(t)
+				got, err := method(nil, 3, 998, [][]common.Hash{
+					{addr1.Hash()},
+					{},
+					{},
+					{hash3, hash4},
+				})
+				require.NoError(err)
+				require.Equal(1, len(got))
+			})
+
+		})
+	}
+}
+
 func TestIndexSearchSingleVariant(t *testing.T) {
 	logger.SetTestMode(t)
 
 	topics, recs, topics4rec := genTestData(100)
 
-	index := New(memorydb.New())
+	index := newIndex(memorydb.NewProducer(""))
 
 	for _, rec := range recs {
 		err := index.Push(rec)
 		require.NoError(t, err)
 	}
 
+	pooled := withThreadPool{index}
+
 	for dsc, method := range map[string]func(context.Context, idx.Block, idx.Block, [][]common.Hash) ([]*types.Log, error){
-		"sync":  index.FindInBlocks,
-		"async": index.FindInBlocksAsync,
+		"index":  index.FindInBlocks,
+		"pooled": pooled.FindInBlocks,
 	} {
 		t.Run(dsc, func(t *testing.T) {
 			require := require.New(t)
@@ -266,7 +304,7 @@ func TestIndexSearchSimple(t *testing.T) {
 	},
 	}
 
-	index := New(memorydb.New())
+	index := newIndex(memorydb.NewProducer(""))
 
 	for _, l := range testdata {
 		err := index.Push(l)
@@ -278,9 +316,11 @@ func TestIndexSearchSimple(t *testing.T) {
 		err error
 	)
 
+	pooled := withThreadPool{index}
+
 	for dsc, method := range map[string]func(context.Context, idx.Block, idx.Block, [][]common.Hash) ([]*types.Log, error){
-		"sync":  index.FindInBlocks,
-		"async": index.FindInBlocksAsync,
+		"index":  index.FindInBlocks,
+		"pooled": pooled.FindInBlocks,
 	} {
 		t.Run(dsc, func(t *testing.T) {
 			require := require.New(t)
@@ -316,9 +356,9 @@ func TestMaxTopicsCount(t *testing.T) {
 	testdata := &types.Log{
 		BlockNumber: 1,
 		Address:     randAddress(),
-		Topics:      make([]common.Hash, MaxTopicsCount),
+		Topics:      make([]common.Hash, maxTopicsCount),
 	}
-	pattern := make([][]common.Hash, MaxTopicsCount+1)
+	pattern := make([][]common.Hash, maxTopicsCount+1)
 	pattern[0] = []common.Hash{testdata.Address.Hash()}
 	for i := range testdata.Topics {
 		testdata.Topics[i] = common.BytesToHash([]byte(fmt.Sprintf("topic%d", i)))
@@ -326,13 +366,15 @@ func TestMaxTopicsCount(t *testing.T) {
 		pattern[i+1] = []common.Hash{testdata.Topics[i]}
 	}
 
-	index := New(memorydb.New())
+	index := newIndex(memorydb.NewProducer(""))
 	err := index.Push(testdata)
 	require.NoError(t, err)
 
+	pooled := withThreadPool{index}
+
 	for dsc, method := range map[string]func(context.Context, idx.Block, idx.Block, [][]common.Hash) ([]*types.Log, error){
-		"sync":  index.FindInBlocks,
-		"async": index.FindInBlocksAsync,
+		"index":  index.FindInBlocks,
+		"pooled": pooled.FindInBlocks,
 	} {
 		t.Run(dsc, func(t *testing.T) {
 			require := require.New(t)
@@ -340,12 +382,12 @@ func TestMaxTopicsCount(t *testing.T) {
 			got, err := method(nil, 0, 0xffffffff, pattern)
 			require.NoError(err)
 			require.Equal(1, len(got))
-			require.Equal(MaxTopicsCount, len(got[0].Topics))
+			require.Equal(maxTopicsCount, len(got[0].Topics))
 		})
 	}
 
-	require.Equal(t, MaxTopicsCount+1, len(pattern))
-	require.Equal(t, MaxTopicsCount+1, len(pattern[0]))
+	require.Equal(t, maxTopicsCount+1, len(pattern))
+	require.Equal(t, maxTopicsCount+1, len(pattern[0]))
 }
 
 func TestPatternLimit(t *testing.T) {
@@ -382,8 +424,8 @@ func TestPatternLimit(t *testing.T) {
 			err: nil,
 		},
 		{
-			pattern: append(append(make([][]common.Hash, MaxTopicsCount-1), []common.Hash{hash.FakeHash(1)}), []common.Hash{hash.FakeHash(1)}),
-			exp:     append(make([][]common.Hash, MaxTopicsCount-1), []common.Hash{hash.FakeHash(1)}),
+			pattern: append(append(make([][]common.Hash, maxTopicsCount), []common.Hash{hash.FakeHash(1)}), []common.Hash{hash.FakeHash(1)}),
+			exp:     append(make([][]common.Hash, maxTopicsCount), []common.Hash{hash.FakeHash(1)}),
 			err:     nil,
 		},
 	}

@@ -6,103 +6,42 @@ import (
 
 	"github.com/Fantom-foundation/lachesis-base/inter/idx"
 	"github.com/Fantom-foundation/lachesis-base/kvdb"
-	"github.com/Fantom-foundation/lachesis-base/kvdb/table"
-
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
-const MaxTopicsCount = 5 // count is limited hard to 5 by EVM (see LOG0...LOG4 ops)
+const maxTopicsCount = 5 // count is limited hard to 5 by EVM (see LOG0...LOG4 ops)
 
 var (
-	ErrEmptyTopics  = fmt.Errorf("Empty topics")
-	ErrTooBigTopics = fmt.Errorf("Too big topics")
+	ErrEmptyTopics  = fmt.Errorf("empty topics")
+	ErrTooBigTopics = fmt.Errorf("too many topics")
 )
 
-// Index is a specialized indexes for log records storing and fetching.
-type Index struct {
-	db    kvdb.Store
-	table struct {
-		// topic+topicN+(blockN+TxHash+logIndex) -> topic_count (where topicN=0 is for address)
-		Topic kvdb.Store `table:"t"`
-		// (blockN+TxHash+logIndex) -> ordered topic_count topics, blockHash, address, data
-		Logrec kvdb.Store `table:"r"`
-	}
+type Index interface {
+	FindInBlocks(ctx context.Context, from, to idx.Block, pattern [][]common.Hash) (logs []*types.Log, err error)
+	ForEachInBlocks(ctx context.Context, from, to idx.Block, pattern [][]common.Hash, onLog func(*types.Log) (gonext bool)) error
+	Push(recs ...*types.Log) error
+	Close()
+
+	WrapTablesAsBatched() (unwrap func())
 }
 
 // New Index instance.
-func New(db kvdb.Store) *Index {
-	tt := &Index{
-		db: db,
-	}
-
-	table.MigrateTables(&tt.table, tt.db)
+func New(dbs kvdb.DBProducer) Index {
+	tt := newIndex(dbs)
 
 	return tt
 }
 
-// FindInBlocks returns all log records of block range by pattern. 1st pattern element is an address.
-// The same as FindInBlocksAsync but fetches log's body sync.
-func (tt *Index) FindInBlocks(ctx context.Context, from, to idx.Block, pattern [][]common.Hash) (logs []*types.Log, err error) {
-	err = tt.ForEachInBlocks(
-		ctx,
-		from, to,
-		pattern,
-		func(l *types.Log) bool {
-			logs = append(logs, l)
-			return true
-		})
-
-	return
-}
-
-// ForEach matches log records by pattern. 1st pattern element is an address.
-func (tt *Index) ForEach(ctx context.Context, pattern [][]common.Hash, onLog func(*types.Log) (gonext bool)) error {
-	pattern, err := limitPattern(pattern)
-	if err != nil {
-		return err
-	}
-
-	onMatched := func(rec *logrec) (gonext bool, err error) {
-		rec.fetch(tt.table.Logrec)
-		if rec.err != nil {
-			err = rec.err
-			return
-		}
-		gonext = onLog(rec.result)
-		return
-	}
-
-	return tt.searchLazy(ctx, pattern, nil, 0, onMatched)
-}
-
-// ForEachInBlocks matches log records of block range by pattern. 1st pattern element is an address.
-func (tt *Index) ForEachInBlocks(ctx context.Context, from, to idx.Block, pattern [][]common.Hash, onLog func(*types.Log) (gonext bool)) error {
-	if from > to {
-		return nil
-	}
-
-	pattern, err := limitPattern(pattern)
-	if err != nil {
-		return err
-	}
-
-	onMatched := func(rec *logrec) (gonext bool, err error) {
-		rec.fetch(tt.table.Logrec)
-		if rec.err != nil {
-			err = rec.err
-			return
-		}
-		gonext = onLog(rec.result)
-		return
-	}
-
-	return tt.searchLazy(ctx, pattern, uintToBytes(uint64(from)), uint64(to), onMatched)
+// New Index instance consumes limited threads count.
+func NewWithThreadPool(dbs kvdb.DBProducer) Index {
+	tt := newIndex(dbs)
+	return &withThreadPool{tt}
 }
 
 func limitPattern(pattern [][]common.Hash) (limited [][]common.Hash, err error) {
-	if len(pattern) > MaxTopicsCount {
-		limited = make([][]common.Hash, MaxTopicsCount)
+	if len(pattern) > (maxTopicsCount + 1) {
+		limited = make([][]common.Hash, (maxTopicsCount + 1))
 	} else {
 		limited = make([][]common.Hash, len(pattern))
 	}
@@ -134,62 +73,4 @@ func uniqOnly(hh []common.Hash) []common.Hash {
 		uniq = append(uniq, h)
 	}
 	return uniq
-}
-
-// MustPush calls Write() and panics if error.
-func (tt *Index) MustPush(recs ...*types.Log) {
-	err := tt.Push(recs...)
-	if err != nil {
-		panic(err)
-	}
-}
-
-// Write log record to database.
-func (tt *Index) Push(recs ...*types.Log) error {
-	for _, rec := range recs {
-		if len(rec.Topics) > MaxTopicsCount {
-			return ErrTooBigTopics
-		}
-
-		id := NewID(rec.BlockNumber, rec.TxHash, rec.Index)
-
-		// write data
-		buf := make([]byte, 0, common.HashLength*len(rec.Topics)+common.HashLength+common.AddressLength+len(rec.Data))
-		for _, topic := range rec.Topics {
-			buf = append(buf, topic.Bytes()...)
-		}
-		buf = append(buf, rec.BlockHash.Bytes()...)
-		buf = append(buf, rec.Address.Bytes()...)
-		buf = append(buf, rec.Data...)
-		if err := tt.table.Logrec.Put(id.Bytes(), buf); err != nil {
-			return err
-		}
-
-		// write index
-		var (
-			count = posToBytes(uint8(len(rec.Topics)))
-			pos   uint8
-		)
-		pushIndex := func(topic common.Hash) error {
-			key := topicKey(topic, pos, id)
-			if err := tt.table.Topic.Put(key, count); err != nil {
-				return err
-			}
-			pos++
-			return nil
-		}
-
-		if err := pushIndex(rec.Address.Hash()); err != nil {
-			return err
-		}
-
-		for _, topic := range rec.Topics {
-			if err := pushIndex(topic); err != nil {
-				return err
-			}
-		}
-
-	}
-
-	return nil
 }

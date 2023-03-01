@@ -93,14 +93,18 @@ type (
 		// RPCGasCap is the global gas cap for eth-call variants.
 		RPCGasCap uint64 `toml:",omitempty"`
 
+		// RPCEVMTimeout is the global timeout for eth-call.
+		RPCEVMTimeout time.Duration
+
 		// RPCTxFeeCap is the global transaction fee(price * gaslimit) cap for
 		// send-transction variants. The unit is ether.
 		RPCTxFeeCap float64 `toml:",omitempty"`
 
+		// RPCTimeout is a global time limit for RPC methods execution.
+		RPCTimeout time.Duration
+
 		// allows only for EIP155 transactions.
 		AllowUnprotectedTxs bool
-
-		ExtRPCEnabled bool
 
 		RPCBlockExt bool
 	}
@@ -109,11 +113,16 @@ type (
 		// Cache size for full events.
 		EventsNum  int
 		EventsSize uint
+		// Cache size for event IDs
+		EventsIDsNum int
 		// Cache size for full blocks.
 		BlocksNum  int
 		BlocksSize uint
 		// Cache size for history block/epoch states.
 		BlockEpochStateNum int
+
+		LlrBlockVotesIndexes int
+		LlrEpochVotesIndexes int
 	}
 
 	// StoreConfig is a config for store db.
@@ -199,6 +208,8 @@ func DefaultConfig(scale cachescale.Func) Config {
 			PeerCache:                DefaultPeerCacheConfig(scale),
 		},
 
+		RPCEVMTimeout: 5 * time.Second,
+
 		GPO: gasprice.Config{
 			MaxGasPrice:      gasprice.DefaultMaxGasPrice,
 			MinGasPrice:      new(big.Int),
@@ -209,6 +220,7 @@ func DefaultConfig(scale cachescale.Func) Config {
 
 		RPCGasCap:   50000000,
 		RPCTxFeeCap: 100, // 100 FTM
+		RPCTimeout:  5 * time.Second,
 	}
 	sessionCfg := cfg.Protocol.DagStreamLeecher.Session
 	cfg.Protocol.DagProcessor.EventsBufferLimit.Num = idx.Event(sessionCfg.ParallelChunksDownload)*
@@ -256,14 +268,17 @@ func (c *Config) Validate() error {
 func DefaultStoreConfig(scale cachescale.Func) StoreConfig {
 	return StoreConfig{
 		Cache: StoreCacheConfig{
-			EventsNum:          scale.I(5000),
-			EventsSize:         scale.U(6 * opt.MiB),
-			BlocksNum:          scale.I(5000),
-			BlocksSize:         scale.U(512 * opt.KiB),
-			BlockEpochStateNum: scale.I(8),
+			EventsNum:            scale.I(5000),
+			EventsSize:           scale.U(6 * opt.MiB),
+			EventsIDsNum:         scale.I(100000),
+			BlocksNum:            scale.I(5000),
+			BlocksSize:           scale.U(512 * opt.KiB),
+			BlockEpochStateNum:   scale.I(8),
+			LlrBlockVotesIndexes: scale.I(100),
+			LlrEpochVotesIndexes: scale.I(5),
 		},
 		EVM:                 evmstore.DefaultStoreConfig(scale),
-		MaxNonFlushedSize:   17*opt.MiB + scale.I(5*opt.MiB),
+		MaxNonFlushedSize:   21*opt.MiB + scale.I(2*opt.MiB),
 		MaxNonFlushedPeriod: 30 * time.Minute,
 	}
 }

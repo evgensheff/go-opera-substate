@@ -4,6 +4,7 @@ import (
 	"github.com/Fantom-foundation/lachesis-base/hash"
 	"github.com/Fantom-foundation/lachesis-base/inter/idx"
 	"github.com/Fantom-foundation/lachesis-base/inter/pos"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/Fantom-foundation/go-opera/inter"
@@ -22,19 +23,29 @@ func (s *Store) HasEpochVote(epoch idx.Epoch, id hash.Event) bool {
 	return ok
 }
 
-func (s *Store) iterateEpochVotesRLP(prefix []byte, f func(key []byte, ev rlp.RawValue) bool) {
+func (s *Store) iterateEpochVotesRLP(prefix []byte, f func(ev rlp.RawValue) bool) {
 	it := s.table.LlrEpochVotes.NewIterator(prefix, nil)
 	defer it.Release()
 	for it.Next() {
-		if !f(it.Key(), it.Value()) {
+		if !f(common.CopyBytes(it.Value())) {
 			break
 		}
 	}
 }
 
+func (s *Store) flushLlrEpochVoteWeight(cKey VotesCacheID, value VotesCacheValue) {
+	key := append(cKey.Epoch.Bytes(), cKey.V[:]...)
+	s.flushLlrVoteWeight(s.table.LlrEpochVoteIndex, key, value.weight, value.set)
+}
+
 func (s *Store) AddLlrEpochVoteWeight(epoch idx.Epoch, ev hash.Hash, val idx.Validator, vals idx.Validator, diff pos.Weight) pos.Weight {
 	key := append(epoch.Bytes(), ev[:]...)
-	return s.addLlrVoteWeight(s.table.LlrEpochVoteIndex, key, val, vals, diff)
+	cKey := VotesCacheID{
+		Block: 0,
+		Epoch: epoch,
+		V:     ev,
+	}
+	return s.addLlrVoteWeight(s.cache.LlrEpochVoteIndex, s.table.LlrEpochVoteIndex, cKey, key, val, vals, diff)
 }
 
 func (s *Store) SetLlrEpochResult(epoch idx.Epoch, ev hash.Hash) {
@@ -67,13 +78,17 @@ type LlrEpochPackRLP struct {
 }
 
 func (s *Store) IterateEpochPacksRLP(start idx.Epoch, f func(epoch idx.Epoch, ep rlp.RawValue) bool) {
-	it := s.table.BlockEpochStateHistory.NewIterator(nil, start.Bytes())
-	defer it.Release()
-	for it.Next() {
-		epoch := idx.BytesToEpoch(it.Key())
-
+	for epoch := start; ; epoch++ {
+		key := epoch.Bytes()
+		val, err := s.table.BlockEpochStateHistory.Get(key)
+		if err != nil {
+			s.Log.Crit("Failed to get block-epoch state", "err", err)
+		}
+		if val == nil {
+			break
+		}
 		evs := make([]rlp.RawValue, 0, 20)
-		s.iterateEpochVotesRLP(it.Key(), func(key []byte, ev rlp.RawValue) bool {
+		s.iterateEpochVotesRLP(key, func(ev rlp.RawValue) bool {
 			evs = append(evs, ev)
 			return len(evs) < maxEpochPackVotes
 		})
@@ -83,7 +98,7 @@ func (s *Store) IterateEpochPacksRLP(start idx.Epoch, f func(epoch idx.Epoch, ep
 		ep := &LlrEpochPackRLP{
 			VotesRLP: evs,
 			Record: LlrIdxFullEpochRecordRLP{
-				RecordRLP: it.Value(),
+				RecordRLP: val,
 				Idx:       epoch,
 			},
 		}

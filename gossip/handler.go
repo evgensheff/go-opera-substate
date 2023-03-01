@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	notify "github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p"
+	"github.com/ethereum/go-ethereum/p2p/discover/discfilter"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 
@@ -281,7 +283,7 @@ func newHandler(
 		},
 		PeerEpoch: func(peer string) idx.Epoch {
 			p := h.peers.Peer(peer)
-			if p == nil {
+			if p == nil || p.Useless() {
 				return 0
 			}
 			return p.progress.Epoch
@@ -299,6 +301,9 @@ func newHandler(
 			return epoch, llrs.LowestBlockToDecide
 		},
 		MaxEpochToDecide: func() idx.Epoch {
+			if !h.syncStatus.RequestLLR() {
+				return 0
+			}
 			return h.store.GetLlrState().LowestEpochToFill
 		},
 		IsProcessed: h.store.HasBlockVotes,
@@ -314,7 +319,7 @@ func newHandler(
 		},
 		PeerBlock: func(peer string) idx.Block {
 			p := h.peers.Peer(peer)
-			if p == nil {
+			if p == nil || p.Useless() {
 				return 0
 			}
 			return p.progress.LastBlockIdx
@@ -330,6 +335,9 @@ func newHandler(
 			return h.store.GetLlrState().LowestBlockToFill
 		},
 		MaxBlockToFill: func() idx.Block {
+			if !h.syncStatus.RequestLLR() {
+				return 0
+			}
 			// rough estimation for the max fill-able block
 			llrs := h.store.GetLlrState()
 			start := llrs.LowestBlockToFill
@@ -352,7 +360,7 @@ func newHandler(
 		},
 		PeerBlock: func(peer string) idx.Block {
 			p := h.peers.Peer(peer)
-			if p == nil {
+			if p == nil || p.Useless() {
 				return 0
 			}
 			return p.progress.LastBlockIdx
@@ -372,6 +380,9 @@ func newHandler(
 			return llrs.LowestEpochToDecide
 		},
 		MaxEpochToFetch: func() idx.Epoch {
+			if !h.syncStatus.RequestLLR() {
+				return 0
+			}
 			return h.store.GetLlrState().LowestEpochToDecide + 10000
 		},
 		IsProcessed: h.store.HasHistoryBlockEpochState,
@@ -387,7 +398,7 @@ func newHandler(
 		},
 		PeerEpoch: func(peer string) idx.Epoch {
 			p := h.peers.Peer(peer)
-			if p == nil {
+			if p == nil || p.Useless() {
 				return 0
 			}
 			return p.progress.Epoch
@@ -771,6 +782,22 @@ func (h *handler) handle(p *peer) error {
 		p.Log().Error("Snapshot extension barrier failed", "err", err)
 		return err
 	}
+	useless := discfilter.Banned(p.Node().ID(), p.Node().Record())
+	if !useless && (!eligibleForSnap(p.Peer) || !strings.Contains(strings.ToLower(p.Name()), "opera")) {
+		useless = true
+		discfilter.Ban(p.ID())
+	}
+	if !p.Peer.Info().Network.Trusted && useless && h.peers.UselessNum() >= h.maxPeers/10 {
+		// don't allow more than 10% of useless peers
+		return p2p.DiscTooManyPeers
+	}
+	if !p.Peer.Info().Network.Trusted && useless {
+		if h.peers.UselessNum() >= h.maxPeers/10 {
+			// don't allow more than 10% of useless peers
+			return p2p.DiscTooManyPeers
+		}
+		p.SetUseless()
+	}
 
 	h.peerWG.Add(1)
 	defer h.peerWG.Done()
@@ -782,6 +809,9 @@ func (h *handler) handle(p *peer) error {
 	)
 	if err := p.Handshake(h.NetworkID, myProgress, common.Hash(genesis)); err != nil {
 		p.Log().Debug("Handshake failed", "err", err)
+		if !useless {
+			discfilter.Ban(p.ID())
+		}
 		return err
 	}
 
@@ -922,10 +952,14 @@ func (h *handler) handleEvents(p *peer, events dag.Events, ordered bool) {
 	// filter too high events
 	notTooHigh := make(dag.Events, 0, len(events))
 	sessionCfg := h.config.Protocol.DagStreamLeecher.Session
+	now := time.Now()
 	for _, e := range events {
 		maxLamport := h.store.GetHighestLamport() + idx.Lamport(sessionCfg.DefaultChunkItemsNum+1)*idx.Lamport(sessionCfg.ParallelChunksDownload)
 		if e.Lamport() <= maxLamport {
 			notTooHigh = append(notTooHigh, e)
+		}
+		if now.Sub(e.(inter.EventI).CreationTime().Time()) < 10*time.Minute {
+			h.syncStatus.MarkMaybeSynced()
 		}
 	}
 	if len(events) != len(notTooHigh) {
@@ -936,7 +970,6 @@ func (h *handler) handleEvents(p *peer, events dag.Events, ordered bool) {
 	}
 	// Schedule all the events for connection
 	peer := *p
-	now := time.Now()
 	requestEvents := func(ids []interface{}) error {
 		return peer.RequestEvents(interfacesToEventIDs(ids))
 	}
@@ -969,8 +1002,6 @@ func (h *handler) handleMsg(p *peer) error {
 	}
 	defer h.msgSemaphore.Release(eventsSizeEst)
 
-	myEpoch := h.store.GetEpoch()
-
 	// Handle the message depending on its contents
 	switch {
 	case msg.Code == HandshakeMsg:
@@ -983,9 +1014,6 @@ func (h *handler) handleMsg(p *peer) error {
 			return errResp(ErrDecode, "%v: %v", msg, err)
 		}
 		p.SetProgress(progress)
-		if progress.Epoch == myEpoch {
-			h.syncStatus.MarkMaybeSynced()
-		}
 
 	case msg.Code == EvmTxsMsg:
 		// Transactions arrived, make sure we have a valid and fresh graph to handle them
@@ -1342,9 +1370,16 @@ func (h *handler) BroadcastEvent(event *inter.EventPayload, passed time.Duration
 
 	fullRecipients := h.decideBroadcastAggressiveness(event.Size(), passed, len(peers))
 
-	// Broadcast of full event to a subset of peers
-	fullBroadcast := peers[:fullRecipients]
-	hashBroadcast := peers[fullRecipients:]
+	// Exclude low quality peers from fullBroadcast
+	var fullBroadcast = make([]*peer, 0, fullRecipients)
+	var hashBroadcast = make([]*peer, 0, len(peers))
+	for _, p := range peers {
+		if !p.Useless() && len(fullBroadcast) < fullRecipients {
+			fullBroadcast = append(fullBroadcast, p)
+		} else {
+			hashBroadcast = append(hashBroadcast, p)
+		}
+	}
 	for _, peer := range fullBroadcast {
 		peer.AsyncSendEvents(inter.EventPayloads{event}, peer.queue)
 	}
@@ -1432,14 +1467,6 @@ func (h *handler) onNewEpochLoop() {
 		select {
 		case myEpoch := <-h.newEpochsCh:
 			h.dagProcessor.Clear()
-			if !h.syncStatus.MaybeSynced() {
-				// Mark initial sync done on any peer which has the same epoch
-				for _, peer := range h.peers.List() {
-					if peer.progress.Epoch == myEpoch {
-						h.syncStatus.MarkMaybeSynced()
-					}
-				}
-			}
 			h.dagLeecher.OnNewEpoch(myEpoch)
 		// Err() channel will be closed when unsubscribing.
 		case <-h.newEpochsSub.Err():

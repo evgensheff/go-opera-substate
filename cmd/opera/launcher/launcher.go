@@ -2,7 +2,6 @@ package launcher
 
 import (
 	"fmt"
-	"os"
 	"path"
 	"sort"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/node"
+	"github.com/ethereum/go-ethereum/p2p/discover/discfilter"
 	"github.com/ethereum/go-ethereum/params"
 	"gopkg.in/urfave/cli.v1"
 
@@ -87,6 +87,8 @@ func initFlags() {
 		utils.NoDiscoverFlag,
 		utils.DiscoveryV5Flag,
 		utils.NetrestrictFlag,
+		utils.IPrestrictFlag,
+		utils.PrivateNodeFlag,
 		utils.NodeKeyFileFlag,
 		utils.NodeKeyHexFlag,
 	}
@@ -120,6 +122,9 @@ func initFlags() {
 		validatorPubkeyFlag,
 		validatorPasswordFlag,
 		SyncModeFlag,
+		GCModeFlag,
+		DBPresetFlag,
+		DBMigrationModeFlag,
 	}
 	legacyRpcFlags = []cli.Flag{
 		utils.NoUSBFlag,
@@ -151,7 +156,9 @@ func initFlags() {
 		utils.IPCDisabledFlag,
 		utils.IPCPathFlag,
 		RPCGlobalGasCapFlag,
+		RPCGlobalEVMTimeoutFlag,
 		RPCGlobalTxFeeCapFlag,
+		RPCGlobalTimeoutFlag,
 	}
 
 	metricsFlags = []cli.Flag{
@@ -184,6 +191,7 @@ func initFlags() {
 
 // init the CLI app.
 func init() {
+	discfilter.Enable()
 	overrideFlags()
 	overrideParams()
 
@@ -216,8 +224,8 @@ func init() {
 		checkCommand,
 		// See snapshot.go
 		snapshotCommand,
-		// See fixdirty.go
-		fixDirtyCommand,
+		// See dbcmd.go
+		dbCommand,
 	}
 	sort.Sort(cli.CommandsByName(app.Commands))
 
@@ -281,20 +289,18 @@ func makeNode(ctx *cli.Context, cfg *config, genesisStore *genesisstore.Store) (
 	errlock.SetDefaultDatadir(cfg.Node.DataDir)
 	errlock.Check()
 
-	chaindataDir := path.Join(cfg.Node.DataDir, "chaindata")
-	if err := os.MkdirAll(chaindataDir, 0700); err != nil {
-		utils.Fatalf("Failed to create chaindata directory: %v", err)
-	}
 	var g *genesis.Genesis
 	if genesisStore != nil {
 		gv := genesisStore.Genesis()
 		g = &gv
 	}
-	engine, dagIndex, gdb, cdb, blockProc := integration.MakeEngine(integration.DBProducer(chaindataDir, cfg.cachescale), g, cfg.AppConfigs())
+
+	engine, dagIndex, gdb, cdb, blockProc, closeDBs := integration.MakeEngine(path.Join(cfg.Node.DataDir, "chaindata"), g, cfg.AppConfigs())
 	if genesisStore != nil {
 		_ = genesisStore.Close()
 	}
 	metrics.SetDataDir(cfg.Node.DataDir)
+	memorizeDBPreset(cfg)
 
 	// substitute default bootnodes if requested
 	networkName := ""
@@ -304,7 +310,7 @@ func makeNode(ctx *cli.Context, cfg *config, genesisStore *genesisstore.Store) (
 	if len(networkName) == 0 && genesisStore != nil {
 		networkName = genesisStore.Header().NetworkName
 	}
-	if len(cfg.Node.P2P.BootstrapNodes) == len(asDefault) && cfg.Node.P2P.BootstrapNodes[0] == asDefault[0] {
+	if needDefaultBootnodes(cfg.Node.P2P.BootstrapNodes) {
 		bootnodes := Bootnodes[networkName]
 		if bootnodes == nil {
 			bootnodes = []string{}
@@ -370,6 +376,9 @@ func makeNode(ctx *cli.Context, cfg *config, genesisStore *genesisstore.Store) (
 		_ = stack.Close()
 		gdb.Close()
 		_ = cdb.Close()
+		if closeDBs != nil {
+			_ = closeDBs()
+		}
 	}
 }
 

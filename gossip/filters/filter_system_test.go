@@ -40,7 +40,7 @@ import (
 
 type testBackend struct {
 	db         ethdb.Database
-	logIndex   *topicsdb.Index
+	logIndex   topicsdb.Index
 	blocksFeed *notify.Feed
 	txsFeed    *notify.Feed
 	logsFeed   *notify.Feed
@@ -49,7 +49,7 @@ type testBackend struct {
 func newTestBackend() *testBackend {
 	return &testBackend{
 		db:         rawdb.NewMemoryDatabase(),
-		logIndex:   topicsdb.New(memorydb.New()),
+		logIndex:   topicsdb.NewWithThreadPool(memorydb.NewProducer("")),
 		blocksFeed: new(notify.Feed),
 		txsFeed:    new(notify.Feed),
 		logsFeed:   new(notify.Feed),
@@ -102,6 +102,10 @@ func (b *testBackend) GetReceipts(ctx context.Context, hash common.Hash) (types.
 	return nil, nil
 }
 
+func (b *testBackend) GetReceiptsByNumber(ctx context.Context, number rpc.BlockNumber) (types.Receipts, error) {
+	return rawdb.ReadReceipts(b.db, common.Hash{}, uint64(number), params.TestChainConfig), nil
+}
+
 func (b *testBackend) GetLogs(ctx context.Context, hash common.Hash) ([][]*types.Log, error) {
 	number := rawdb.ReadHeaderNumber(b.db, hash)
 	if number == nil {
@@ -129,12 +133,23 @@ func (b *testBackend) SubscribeNewBlockNotify(ch chan<- evmcore.ChainHeadNotify)
 	return b.blocksFeed.Subscribe(ch)
 }
 
-func (b *testBackend) EvmLogIndex() *topicsdb.Index {
+func (b *testBackend) EvmLogIndex() topicsdb.Index {
 	return b.logIndex
+}
+
+func (b *testBackend) MustPushLogs(recs ...*types.Log) {
+	err := b.logIndex.Push(recs...)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func (b *testBackend) GetTxPosition(txid common.Hash) *evmstore.TxPosition {
 	return nil
+}
+
+func (b *testBackend) CalcBlockExtApi() bool {
+	return true
 }
 
 // TestBlockSubscription tests if a block subscription returns block hashes for posted chain notify.

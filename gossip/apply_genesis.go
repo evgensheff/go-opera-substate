@@ -4,7 +4,9 @@ import (
 	"errors"
 
 	"github.com/Fantom-foundation/lachesis-base/hash"
+	"github.com/Fantom-foundation/lachesis-base/kvdb/batched"
 
+	"github.com/Fantom-foundation/go-opera/inter/iblockproc"
 	"github.com/Fantom-foundation/go-opera/inter/ibr"
 	"github.com/Fantom-foundation/go-opera/inter/ier"
 	"github.com/Fantom-foundation/go-opera/opera/genesis"
@@ -12,6 +14,10 @@ import (
 
 // ApplyGenesis writes initial state.
 func (s *Store) ApplyGenesis(g genesis.Genesis) (genesisHash hash.Hash, err error) {
+	// use batching wrapper for hot tables
+	unwrap := s.WrapTablesAsBatched()
+	defer unwrap()
+
 	// write epochs
 	var topEr *ier.LlrIdxFullEpochRecord
 	g.Epochs.ForEach(func(er ier.LlrIdxFullEpochRecord) bool {
@@ -31,6 +37,12 @@ func (s *Store) ApplyGenesis(g genesis.Genesis) (genesisHash hash.Hash, err erro
 	if topEr == nil {
 		return genesisHash, errors.New("no ERs in genesis")
 	}
+	var prevEs *iblockproc.EpochState
+	s.ForEachHistoryBlockEpochState(func(bs iblockproc.BlockState, es iblockproc.EpochState) bool {
+		s.WriteUpgradeHeight(bs, es, prevEs)
+		prevEs = &es
+		return true
+	})
 	s.SetBlockEpochState(topEr.BlockState, topEr.EpochState)
 	s.FlushBlockEpochState()
 
@@ -59,4 +71,22 @@ func (s *Store) ApplyGenesis(g genesis.Genesis) (genesisHash hash.Hash, err erro
 	s.SetGenesisBlockIndex(topEr.BlockState.LastBlock.Idx)
 
 	return genesisHash, err
+}
+
+func (s *Store) WrapTablesAsBatched() (unwrap func()) {
+	origTables := s.table
+
+	batchedBlocks := batched.Wrap(s.table.Blocks)
+	s.table.Blocks = batchedBlocks
+
+	batchedBlockHashes := batched.Wrap(s.table.BlockHashes)
+	s.table.BlockHashes = batchedBlockHashes
+
+	unwrapEVM := s.evm.WrapTablesAsBatched()
+	return func() {
+		unwrapEVM()
+		_ = batchedBlocks.Flush()
+		_ = batchedBlockHashes.Flush()
+		s.table = origTables
+	}
 }
