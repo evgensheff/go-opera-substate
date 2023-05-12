@@ -80,7 +80,7 @@ func importEvents(ctx *cli.Context) error {
 	if ctx.Bool(RecordingFlag.Name) {
 		// OpenSubstateDB
 		substate.RecordReplay = true
-		substate.SetSubstateDirectory(ctx.String(SubstateDirFlag.Name))
+		substate.SetSubstateDb(ctx.String(SubstateDbFlag.Name))
 		substate.OpenSubstateDB()
 		defer substate.CloseSubstateDB()
 	}
