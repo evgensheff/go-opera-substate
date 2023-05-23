@@ -17,10 +17,10 @@ The recorder records transaction substates via ```opera import events``` command
 opera import events --recording fantom_exported_events
 ```
 
-The substate database is stored in ```substate.fantom``` directory by default. The substate directory can optionally be set using the ```--substatedir``` option.
+The substate database is stored in ```substate.fantom``` directory by default. The substate directory can optionally be set using the ```--substate-db``` option.
 
 ```
-opera import events --recording --substatedir /path/to/substate_directory fantom_exported_events
+opera import events --recording --substate-db /path/to/substate_directory fantom_exported_events
 ```
 
 # Opera 

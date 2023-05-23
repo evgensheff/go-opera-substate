@@ -39,8 +39,8 @@ Events are fully verified by default, unless overridden by check=false flag.`,
 				ArgsUsage: "<filename> (<filename 2> ... <filename N>)",
 				Flags: []cli.Flag{
 					DataDirFlag,
-					// record-replay: geth import --substatedir flag
-					SubstateDirFlag,
+					// record-replay: geth import --substate-db flag
+					SubstateDbFlag,
 					RecordingFlag,
 					ProfileEVMCallFlag,
 					MicroProfilingFlag,

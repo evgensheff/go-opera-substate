@@ -132,8 +132,8 @@ var (
 		Usage: "DBs layout preset ('pbl-1' or 'ldb-1' or 'legacy-ldb' or 'legacy-pbl')",
 	}
 	// Record/replay
-	SubstateDirFlag = cli.StringFlag{
-		Name:  "substatedir",
+	SubstateDbFlag = cli.StringFlag{
+		Name:  "substate-db",
 		Usage: "Data directory for substate recorder/replayer",
 		Value: "./substate.fantom",
 	}
