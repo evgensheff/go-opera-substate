@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	substate "github.com/Fantom-foundation/Substate"
 	"github.com/Fantom-foundation/lachesis-base/inter/idx"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
@@ -125,6 +126,8 @@ func initFlags() {
 		GCModeFlag,
 		DBPresetFlag,
 		DBMigrationModeFlag,
+		SubstateDbFlag,
+		RecordingFlag,
 	}
 	legacyRpcFlags = []cli.Flag{
 		utils.NoUSBFlag,
@@ -274,6 +277,14 @@ func lachesisMain(ctx *cli.Context) error {
 	//	return err
 	//}
 	//defer tracingStop()
+
+	if ctx.Bool(RecordingFlag.Name) {
+		// OpenSubstateDB
+		substate.RecordReplay = true
+		substate.SetSubstateDb(ctx.String(SubstateDbFlag.Name))
+		substate.OpenSubstateDB()
+		defer substate.CloseSubstateDB()
+	}
 
 	cfg := makeAllConfigs(ctx)
 	genesisStore := mayGetGenesisStore(ctx)
