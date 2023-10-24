@@ -8,11 +8,11 @@ import (
 	"github.com/Fantom-foundation/lachesis-base/inter/idx"
 	"github.com/Fantom-foundation/lachesis-base/inter/pos"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
-	notify "github.com/ethereum/go-ethereum/event"
 
-	"github.com/Fantom-foundation/go-opera/evmcore"
 	"github.com/Fantom-foundation/go-opera/inter"
+	"github.com/Fantom-foundation/go-opera/inter/iblockproc"
 	"github.com/Fantom-foundation/go-opera/opera"
 	"github.com/Fantom-foundation/go-opera/valkeystore"
 	"github.com/Fantom-foundation/go-opera/vecmt"
@@ -37,6 +37,8 @@ type (
 		IsBusy() bool
 		IsSynced() bool
 		PeersNum() int
+
+		StateDB() *state.StateDB
 	}
 
 	// aliases for mock generator
@@ -68,6 +70,7 @@ type Reader interface {
 	LlrReader
 	GetLatestBlockIndex() idx.Block
 	GetEpochValidators() (*pos.Validators, idx.Epoch)
+	GetHistoryEpochState(epoch idx.Epoch) *iblockproc.EpochState
 	GetEvent(hash.Event) *inter.Event
 	GetEventPayload(hash.Event) *inter.EventPayload
 	GetLastEvent(epoch idx.Epoch, from idx.ValidatorID) *hash.Event
@@ -83,10 +86,6 @@ type TxPool interface {
 	// Pending should return pending transactions.
 	// The slice should be modifiable by the caller.
 	Pending(enforceTips bool) (map[common.Address]types.Transactions, error)
-
-	// SubscribeNewTxsNotify should return an event subscription of
-	// NewTxsNotify and send events to the given channel.
-	SubscribeNewTxsNotify(chan<- evmcore.NewTxsNotify) notify.Subscription
 
 	// Count returns the total number of transactions
 	Count() int

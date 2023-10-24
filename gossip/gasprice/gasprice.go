@@ -24,6 +24,7 @@ import (
 
 	"github.com/Fantom-foundation/lachesis-base/inter/idx"
 	"github.com/Fantom-foundation/lachesis-base/utils/piecefunc"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/core/types"
 	lru "github.com/hashicorp/golang-lru"
@@ -48,6 +49,7 @@ const (
 type Config struct {
 	MaxGasPrice      *big.Int `toml:",omitempty"`
 	MinGasPrice      *big.Int `toml:",omitempty"`
+	MinGasTip        *big.Int `toml:",omitempty"`
 	DefaultCertainty uint64   `toml:",omitempty"`
 }
 
@@ -56,7 +58,7 @@ type Reader interface {
 	TotalGasPowerLeft() uint64
 	GetRules() opera.Rules
 	GetPendingRules() opera.Rules
-	PendingTxs() types.Transactions
+	PendingTxs() map[common.Address]types.Transactions
 }
 
 type tipCache struct {
@@ -106,7 +108,8 @@ func sanitizeBigInt(val, min, max, _default *big.Int, name string) *big.Int {
 // gasprice for newly created transaction.
 func NewOracle(params Config) *Oracle {
 	params.MaxGasPrice = sanitizeBigInt(params.MaxGasPrice, nil, nil, DefaultMaxGasPrice, "MaxGasPrice")
-	params.MinGasPrice = sanitizeBigInt(params.MinGasPrice, nil, nil, new(big.Int), "MinGasPrice")
+	params.MinGasPrice = sanitizeBigInt(params.MinGasPrice, nil, params.MaxGasPrice, new(big.Int), "MinGasPrice")
+	params.MinGasTip = sanitizeBigInt(params.MinGasTip, nil, new(big.Int).Sub(params.MaxGasPrice, params.MinGasPrice), new(big.Int), "MinGasTip")
 	params.DefaultCertainty = sanitizeBigInt(new(big.Int).SetUint64(params.DefaultCertainty), big.NewInt(0), DecimalUnitBn, big.NewInt(DecimalUnit/2), "DefaultCertainty").Uint64()
 	tCache, _ := lru.New(100)
 	return &Oracle{
@@ -147,8 +150,8 @@ func (gpo *Oracle) suggestTip(certainty uint64) *big.Int {
 	}
 
 	tip := new(big.Int).Sub(combined, minPrice)
-	if tip.Sign() < 0 {
-		return new(big.Int)
+	if tip.Cmp(gpo.cfg.MinGasTip) < 0 {
+		return new(big.Int).Set(gpo.cfg.MinGasTip)
 	}
 	return tip
 }

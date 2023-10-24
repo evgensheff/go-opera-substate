@@ -1,6 +1,7 @@
 package emitter
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -14,13 +15,12 @@ import (
 	"github.com/Fantom-foundation/lachesis-base/inter/pos"
 	"github.com/Fantom-foundation/lachesis-base/utils/piecefunc"
 	"github.com/ethereum/go-ethereum/core/types"
-	lru "github.com/hashicorp/golang-lru"
 
-	"github.com/Fantom-foundation/go-opera/evmcore"
 	"github.com/Fantom-foundation/go-opera/gossip/emitter/originatedtxs"
 	"github.com/Fantom-foundation/go-opera/inter"
 	"github.com/Fantom-foundation/go-opera/logger"
 	"github.com/Fantom-foundation/go-opera/tracing"
+	"github.com/Fantom-foundation/go-opera/utils/errlock"
 	"github.com/Fantom-foundation/go-opera/utils/rate"
 )
 
@@ -30,8 +30,6 @@ const (
 )
 
 type Emitter struct {
-	txTime *lru.Cache // tx hash -> tx time
-
 	config Config
 
 	world World
@@ -60,9 +58,11 @@ type Emitter struct {
 	prevRecheckedChallenges time.Time
 
 	quorumIndexer  *ancestor.QuorumIndexer
+	fcIndexer      *ancestor.FCIndexer
 	payloadIndexer *ancestor.PayloadIndexer
 
-	intervals EmitIntervals
+	intervals                EmitIntervals
+	globalConfirmingInterval time.Duration
 
 	done chan struct{}
 	wg   sync.WaitGroup
@@ -94,14 +94,13 @@ func NewEmitter(
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	config.EmitIntervals = config.EmitIntervals.RandomizeEmitTime(r)
 
-	txTime, _ := lru.New(TxTimeBufferSize)
 	return &Emitter{
-		config:        config,
-		world:         world,
-		originatedTxs: originatedtxs.New(SenderCountBufferSize),
-		txTime:        txTime,
-		intervals:     config.EmitIntervals,
-		Periodic:      logger.Periodic{Instance: logger.New()},
+		config:                   config,
+		world:                    world,
+		originatedTxs:            originatedtxs.New(SenderCountBufferSize),
+		intervals:                config.EmitIntervals,
+		globalConfirmingInterval: config.EmitIntervals.Confirming,
+		Periodic:                 logger.Periodic{Instance: logger.New()},
 	}
 }
 
@@ -137,9 +136,6 @@ func (em *Emitter) Start() {
 	em.init()
 	em.done = make(chan struct{})
 
-	newTxsCh := make(chan evmcore.NewTxsNotify)
-	em.world.TxPool.SubscribeNewTxsNotify(newTxsCh)
-
 	done := em.done
 	if em.config.EmitIntervals.Min == 0 {
 		return
@@ -152,14 +148,12 @@ func (em *Emitter) Start() {
 		defer timer.Stop()
 		for {
 			select {
-			case txNotify := <-newTxsCh:
-				em.memorizeTxTimes(txNotify.Txs)
 			case <-timer.C:
 				em.tick()
+				timer.Reset(tick)
 			case <-done:
 				return
 			}
-			timer.Reset(tick)
 		}
 	}()
 }
@@ -315,6 +309,12 @@ func (em *Emitter) createEvent(sortedTxs *types.TransactionsByPriceAndNonce) (*i
 	if !ok {
 		return nil, nil
 	}
+	prevEmitted := em.readLastEmittedEventID()
+	if prevEmitted != nil && prevEmitted.Epoch() >= em.epoch {
+		if selfParent == nil || *selfParent != *prevEmitted {
+			errlock.Permanent(errors.New("Local database is corrupted, which may lead to a doublesign"))
+		}
+	}
 
 	// Set parent-dependent fields
 	parentHeaders := make(inter.Events, len(parents))
@@ -372,8 +372,21 @@ func (em *Emitter) createEvent(sortedTxs *types.TransactionsByPriceAndNonce) (*i
 	var metric ancestor.Metric
 	err := em.world.Build(mutEvent, func() {
 		// calculate event metric when it is indexed by the vector clock
-		metric = eventMetric(em.quorumIndexer.GetMetricOf(mutEvent.ID()), mutEvent.Seq())
-		metric = overheadAdjustedEventMetricF(em.validators.Len(), uint64(em.busyRate.Rate1()*piecefunc.DecimalUnit), metric)
+		if em.fcIndexer != nil {
+			pastMe := em.fcIndexer.ValidatorsPastMe()
+			metric = (ancestor.Metric(pastMe) * piecefunc.DecimalUnit) / ancestor.Metric(em.validators.TotalWeight())
+			if pastMe < em.validators.Quorum() {
+				metric /= 15
+			}
+			if metric < 0.03*piecefunc.DecimalUnit {
+				metric = 0.03 * piecefunc.DecimalUnit
+			}
+			metric = overheadAdjustedEventMetricF(em.validators.Len(), uint64(em.busyRate.Rate1()*piecefunc.DecimalUnit), metric)
+			metric = kickStartMetric(metric, mutEvent.Seq())
+		} else if em.quorumIndexer != nil {
+			metric = eventMetric(em.quorumIndexer.GetMetricOf(hash.Events{mutEvent.ID()}), mutEvent.Seq())
+			metric = overheadAdjustedEventMetricF(em.validators.Len(), uint64(em.busyRate.Rate1()*piecefunc.DecimalUnit), metric)
+		}
 	})
 	if err != nil {
 		if err == ErrNotEnoughGasPower {

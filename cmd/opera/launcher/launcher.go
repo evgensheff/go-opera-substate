@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/console/prompt"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/log"
+	gmetrics "github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/p2p/discover/discfilter"
 	"github.com/ethereum/go-ethereum/params"
@@ -310,7 +311,10 @@ func makeNode(ctx *cli.Context, cfg *config, genesisStore *genesisstore.Store) (
 	if genesisStore != nil {
 		_ = genesisStore.Close()
 	}
-	metrics.SetDataDir(cfg.Node.DataDir)
+
+	if gmetrics.Enabled {
+		metrics.SetDataDir(cfg.Node.DataDir)
+	}
 	memorizeDBPreset(cfg)
 
 	// substitute default bootnodes if requested
@@ -371,12 +375,13 @@ func makeNode(ctx *cli.Context, cfg *config, genesisStore *genesisstore.Store) (
 	if err != nil {
 		utils.Fatalf("Failed to create the service: %v", err)
 	}
+	err = engine.StartFrom(svc.GetConsensusCallbacks(), gdb.GetEpoch(), gdb.GetValidators())
+	if err != nil {
+		utils.Fatalf("Failed to start the engine: %v", err)
+	}
+	svc.ReprocessEpochEvents()
 	if cfg.Emitter.Validator.ID != 0 {
 		svc.RegisterEmitter(emitter.NewEmitter(cfg.Emitter, svc.EmitterWorld(signer)))
-	}
-	err = engine.Bootstrap(svc.GetConsensusCallbacks())
-	if err != nil {
-		utils.Fatalf("Failed to bootstrap the engine: %v", err)
 	}
 
 	stack.RegisterAPIs(svc.APIs())

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"path"
 	"path/filepath"
@@ -524,7 +525,10 @@ func mayMakeAllConfigs(ctx *cli.Context) (*config, error) {
 	}
 
 	if ctx.GlobalIsSet(FakeNetFlag.Name) {
-		_, num, _ := parseFakeGen(ctx.GlobalString(FakeNetFlag.Name))
+		_, num, err := parseFakeGen(ctx.GlobalString(FakeNetFlag.Name))
+		if err != nil {
+			return nil, fmt.Errorf("invalid fakenet flag")
+		}
 		cfg.Emitter = emitter.FakeConfig(num)
 		setBootnodes(ctx, []string{}, &cfg.Node)
 	} else {
@@ -564,6 +568,13 @@ func mayMakeAllConfigs(ctx *cli.Context) (*config, error) {
 
 	// Process DBs defaults in the end because they are applied only in absence of config or flags
 	cfg = setDBConfigDefault(cfg, cacheRatio)
+	// Sanitize GPO config
+	if cfg.Opera.GPO.MinGasTip == nil || cfg.Opera.GPO.MinGasTip.Sign() == 0 {
+		cfg.Opera.GPO.MinGasTip = new(big.Int).SetUint64(cfg.TxPool.PriceLimit)
+	}
+	if cfg.Opera.GPO.MinGasTip.Cmp(new(big.Int).SetUint64(cfg.TxPool.PriceLimit)) < 0 {
+		log.Warn(fmt.Sprintf("GPO minimum gas tip (Opera.GPO.MinGasTip=%s) is lower than txpool minimum gas tip (TxPool.PriceLimit=%d)", cfg.Opera.GPO.MinGasTip.String(), cfg.TxPool.PriceLimit))
+	}
 
 	if err := cfg.Opera.Validate(); err != nil {
 		return nil, err

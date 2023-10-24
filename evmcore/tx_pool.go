@@ -36,6 +36,7 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 
 	"github.com/Fantom-foundation/go-opera/utils/signers/gsignercache"
+	"github.com/Fantom-foundation/go-opera/utils/txtime"
 )
 
 const (
@@ -152,7 +153,7 @@ type TxPoolConfig struct {
 	Journal   string           // Journal of local transactions to survive node restarts
 	Rejournal time.Duration    // Time interval to regenerate the local transaction journal
 
-	PriceLimit uint64 // Minimum gas price to enforce for acceptance into the pool
+	PriceLimit uint64 // Minimum gas tip to enforce for acceptance into the pool
 	PriceBump  uint64 // Minimum price bump percentage to replace an already existing transaction (nonce)
 
 	AccountSlots uint64 // Number of executable transaction slots guaranteed per account
@@ -169,7 +170,7 @@ var DefaultTxPoolConfig = TxPoolConfig{
 	Journal:   "transactions.rlp",
 	Rejournal: time.Hour,
 
-	PriceLimit: 1,
+	PriceLimit: 0,
 	PriceBump:  10,
 
 	AccountSlots: 16,
@@ -187,10 +188,6 @@ func (config *TxPoolConfig) sanitize() TxPoolConfig {
 	if conf.Rejournal < time.Second {
 		log.Warn("Sanitizing invalid txpool journal time", "provided", conf.Rejournal, "updated", time.Second)
 		conf.Rejournal = time.Second
-	}
-	if conf.PriceLimit < 1 {
-		log.Warn("Sanitizing invalid txpool price limit", "provided", conf.PriceLimit, "updated", DefaultTxPoolConfig.PriceLimit)
-		conf.PriceLimit = DefaultTxPoolConfig.PriceLimit
 	}
 	if conf.PriceBump < 1 {
 		log.Warn("Sanitizing invalid txpool price bump", "provided", conf.PriceBump, "updated", DefaultTxPoolConfig.PriceBump)
@@ -555,17 +552,6 @@ func (pool *TxPool) Pending(enforceTips bool) (map[common.Address]types.Transact
 	return pending, nil
 }
 
-func (pool *TxPool) PendingSlice() types.Transactions {
-	pool.mu.Lock()
-	defer pool.mu.Unlock()
-
-	pending := make(types.Transactions, 0, 1000)
-	for _, list := range pool.pending {
-		pending = append(pending, list.Flatten()...)
-	}
-	return pending
-}
-
 func (pool *TxPool) SampleHashes(max int) []common.Hash {
 	return pool.all.SampleHashes(max)
 }
@@ -898,6 +884,7 @@ func (pool *TxPool) AddRemote(tx *types.Transaction) error {
 
 // addTxs attempts to queue a batch of transactions if they are valid.
 func (pool *TxPool) addTxs(txs []*types.Transaction, local, sync bool) []error {
+	arrivedAt := time.Now()
 	// Filter out known ones without obtaining the pool lock or recovering signatures
 	var (
 		errs = make([]error, len(txs))
@@ -929,6 +916,13 @@ func (pool *TxPool) addTxs(txs []*types.Transaction, local, sync bool) []error {
 	pool.mu.Lock()
 	newErrs, dirtyAddrs := pool.addTxsLocked(news, local)
 	pool.mu.Unlock()
+
+	// memorize tx time of validated transactions
+	for i, tx := range news {
+		if newErrs[i] == nil {
+			txtime.Validated(tx.Hash(), arrivedAt)
+		}
+	}
 
 	var nilSlot = 0
 	for _, err := range newErrs {
