@@ -1,9 +1,9 @@
 module github.com/Fantom-foundation/go-opera
 
-go 1.17
+go 1.21
 
 require (
-	github.com/Fantom-foundation/Substate v0.0.0-20230512151613-f039b23bf3f7
+	github.com/Fantom-foundation/Substate v0.0.0-20240328090846-4abefcad12de
 	github.com/Fantom-foundation/lachesis-base v0.0.0-20221208123620-82a6d15f995c
 	github.com/allegro/bigcache v1.2.1 // indirect
 	github.com/certifi/gocertifi v0.0.0-20191021191039-0944d244cd40 // indirect
@@ -40,9 +40,9 @@ require (
 	github.com/uber/jaeger-client-go v2.20.1+incompatible
 	github.com/uber/jaeger-lib v2.2.0+incompatible
 	go.uber.org/atomic v1.5.1 // indirect
-	golang.org/x/crypto v0.0.0-20210921155107-089bfa567519
-	golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a
-	golang.org/x/tools v0.1.5 // indirect
+	golang.org/x/crypto v0.17.0
+	golang.org/x/sys v0.15.0
+	golang.org/x/tools v0.6.0 // indirect
 	gopkg.in/urfave/cli.v1 v1.20.0
 )
 
@@ -102,9 +102,9 @@ require (
 	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
 	golang.org/x/exp v0.0.0-20200513190911-00229845015e // indirect
 	golang.org/x/lint v0.0.0-20200302205851-738671d3881b // indirect
-	golang.org/x/net v0.0.0-20210805182204-aaa1db679c0d // indirect
-	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c // indirect
-	golang.org/x/text v0.3.7 // indirect
+	golang.org/x/net v0.10.0 // indirect
+	golang.org/x/sync v0.1.0 // indirect
+	golang.org/x/text v0.14.0 // indirect
 	golang.org/x/time v0.0.0-20210220033141-f8bda1e9f3ba // indirect
 	google.golang.org/protobuf v1.27.1 // indirect
 	gopkg.in/natefinch/npipe.v2 v2.0.0-20160621034901-c1b8fa8bdcce // indirect

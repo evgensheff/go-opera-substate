@@ -21,7 +21,9 @@ import (
 	"math"
 	"math/big"
 
-	substate "github.com/Fantom-foundation/Substate"
+	"github.com/Fantom-foundation/Substate/substate"
+	stypes "github.com/Fantom-foundation/Substate/types"
+	"github.com/Fantom-foundation/Substate/types/hash"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -29,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 
+	innerSubstate "github.com/Fantom-foundation/go-opera/substate"
 	"github.com/Fantom-foundation/go-opera/utils/signers/gsignercache"
 	"github.com/Fantom-foundation/go-opera/utils/signers/internaltx"
 )
@@ -101,17 +104,48 @@ func (p *StateProcessor) Process(
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
 		}
-		if substate.RecordReplay {
+		if innerSubstate.RecordReplay {
 			// save tx substate into DBs, merge block hashes to env
 			etherBlock := block.RecordingEthBlock()
+			to := stypes.Address(msg.To().Bytes())
+			dataHash := hash.Keccak256Hash(msg.Data())
 			recording := substate.NewSubstate(
 				statedb.SubstatePreAlloc,
 				statedb.SubstatePostAlloc,
-				substate.NewSubstateEnv(etherBlock, statedb.SubstateBlockHashes),
-				substate.NewSubstateMessage(&msg),
-				substate.NewSubstateResult(receipt),
+				substate.NewEnv(
+					stypes.Address(etherBlock.Coinbase()),
+					etherBlock.Difficulty(),
+					etherBlock.GasLimit(),
+					etherBlock.NumberU64(),
+					etherBlock.Time(),
+					etherBlock.BaseFee(),
+					innerSubstate.HashGethToSubstate(statedb.SubstateBlockHashes)),
+				substate.NewMessage(
+					msg.Nonce(),
+					msg.IsFake(),
+					msg.GasPrice(),
+					msg.Gas(),
+					stypes.Address(msg.From()),
+					&to,
+					msg.Value(),
+					msg.Data(),
+					&dataHash,
+					innerSubstate.AccessListGethToSubstate(msg.AccessList()),
+					msg.GasFeeCap(),
+					msg.GasTipCap()),
+				substate.NewResult(
+					receipt.Status,
+					receipt.Bloom.Bytes(),
+					innerSubstate.LogsGethToSubstate(receipt.Logs),
+					stypes.Address(receipt.ContractAddress),
+					receipt.GasUsed),
+				blockNumber.Uint64(),
+				txCounter,
 			)
-			substate.PutSubstate(block.NumberU64(), txCounter, recording)
+			err = innerSubstate.PutSubstate(recording)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("could not put substate %d [%v]: %w", i, tx.Hash().Hex(), err)
+			}
 		}
 		txCounter++
 		receipts = append(receipts, receipt)

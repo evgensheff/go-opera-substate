@@ -14,12 +14,12 @@ import (
 	"syscall"
 	"time"
 
-	substate "github.com/Fantom-foundation/Substate"
 	"github.com/Fantom-foundation/go-opera/evmcore"
 	"github.com/Fantom-foundation/go-opera/gossip"
 	"github.com/Fantom-foundation/go-opera/gossip/emitter"
 	"github.com/Fantom-foundation/go-opera/inter"
 	"github.com/Fantom-foundation/go-opera/opera/genesisstore"
+	"github.com/Fantom-foundation/go-opera/substate"
 	"github.com/Fantom-foundation/go-opera/utils/ioread"
 	"github.com/Fantom-foundation/lachesis-base/hash"
 	"github.com/Fantom-foundation/lachesis-base/inter/idx"
@@ -79,10 +79,14 @@ func importEvents(ctx *cli.Context) error {
 
 	if ctx.Bool(RecordingFlag.Name) {
 		// OpenSubstateDB
-		substate.RecordReplay = true
-		substate.SetSubstateDb(ctx.String(SubstateDbFlag.Name))
-		substate.OpenSubstateDB()
-		defer substate.CloseSubstateDB()
+		if !substate.RecordReplay {
+			substate.RecordReplay = true
+			err := substate.NewSubstateDB(ctx.String(SubstateDbFlag.Name))
+			if err != nil {
+				return err
+			}
+			defer substate.CloseSubstateDB()
+		}
 	}
 
 	if ctx.Bool(ProfileEVMCallFlag.Name) {

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	substate "github.com/Fantom-foundation/Substate"
 	"github.com/Fantom-foundation/lachesis-base/inter/idx"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
@@ -32,6 +31,7 @@ import (
 	"github.com/Fantom-foundation/go-opera/integration"
 	"github.com/Fantom-foundation/go-opera/opera/genesis"
 	"github.com/Fantom-foundation/go-opera/opera/genesisstore"
+	"github.com/Fantom-foundation/go-opera/substate"
 	"github.com/Fantom-foundation/go-opera/utils/errlock"
 	"github.com/Fantom-foundation/go-opera/valkeystore"
 	_ "github.com/Fantom-foundation/go-opera/version"
@@ -278,11 +278,12 @@ func lachesisMain(ctx *cli.Context) error {
 	//}
 	//defer tracingStop()
 
-	if ctx.Bool(RecordingFlag.Name) {
-		// OpenSubstateDB
+	if !substate.RecordReplay {
 		substate.RecordReplay = true
-		substate.SetSubstateDb(ctx.String(SubstateDbFlag.Name))
-		substate.OpenSubstateDB()
+		err := substate.NewSubstateDB(ctx.String(SubstateDbFlag.Name))
+		if err != nil {
+			return err
+		}
 		defer substate.CloseSubstateDB()
 	}
 
