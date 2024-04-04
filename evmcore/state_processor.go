@@ -22,8 +22,6 @@ import (
 	"math/big"
 
 	"github.com/Fantom-foundation/Substate/substate"
-	stypes "github.com/Fantom-foundation/Substate/types"
-	"github.com/Fantom-foundation/Substate/types/hash"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -107,38 +105,12 @@ func (p *StateProcessor) Process(
 		if innerSubstate.RecordReplay {
 			// save tx substate into DBs, merge block hashes to env
 			etherBlock := block.RecordingEthBlock()
-			to := stypes.Address(msg.To().Bytes())
-			dataHash := hash.Keccak256Hash(msg.Data())
 			recording := substate.NewSubstate(
 				statedb.SubstatePreAlloc,
 				statedb.SubstatePostAlloc,
-				substate.NewEnv(
-					stypes.Address(etherBlock.Coinbase()),
-					etherBlock.Difficulty(),
-					etherBlock.GasLimit(),
-					etherBlock.NumberU64(),
-					etherBlock.Time(),
-					etherBlock.BaseFee(),
-					innerSubstate.HashGethToSubstate(statedb.SubstateBlockHashes)),
-				substate.NewMessage(
-					msg.Nonce(),
-					msg.IsFake(),
-					msg.GasPrice(),
-					msg.Gas(),
-					stypes.Address(msg.From()),
-					&to,
-					msg.Value(),
-					msg.Data(),
-					&dataHash,
-					innerSubstate.AccessListGethToSubstate(msg.AccessList()),
-					msg.GasFeeCap(),
-					msg.GasTipCap()),
-				substate.NewResult(
-					receipt.Status,
-					receipt.Bloom.Bytes(),
-					innerSubstate.LogsGethToSubstate(receipt.Logs),
-					stypes.Address(receipt.ContractAddress),
-					receipt.GasUsed),
+				innerSubstate.NewEnv(etherBlock, statedb),
+				innerSubstate.NewMessage(&msg),
+				innerSubstate.NewResult(receipt),
 				blockNumber.Uint64(),
 				txCounter,
 			)
