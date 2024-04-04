@@ -47,7 +47,8 @@ The state transitioning model does all the necessary work to work out a valid ne
 4) Value transfer
 == If contract creation ==
   4a) Attempt to run transaction data
-  4b) If valid, use result as code for the new state object== end ==
+  4b) If valid, use result as code for the new state object
+== end ==
 5) Run Script section
 6) Derive new state root
 */
@@ -235,11 +236,11 @@ func (st *StateTransition) internal() bool {
 // TransitionDb will transition the state by applying the current message and
 // returning the evm execution result with following fields.
 //
-//  - used gas:
+// - used gas:
 //      total gas used (including gas being refunded)
-//  - returndata:
+// - returndata:
 //      the returned data from evm
-//  - concrete execution error:
+// - concrete execution error:
 //      various **EVM** error which aborts the execution,
 //      e.g. ErrOutOfGas, ErrExecutionReverted
 //
