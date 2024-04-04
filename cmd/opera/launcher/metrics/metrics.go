@@ -21,8 +21,8 @@ func SetDataDir(datadir string) {
 
 func measureDbDir(name, datadir string) {
 	var (
-		dbSize atomic.Int64
-		gauge  metrics.Gauge
+		dbSize  atomic.Int64
+		gauge   metrics.Gauge
 		rescan = (len(datadir) > 0 && datadir != "inmemory")
 	)
 	for {
